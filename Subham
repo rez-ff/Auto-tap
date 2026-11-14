@@ -1,0 +1,1037 @@
+--═══════════════════════════════════════════════════════════════════════════
+-- 👑 SUBHAM STUFF — MERGED UI + AUTO CLICKER + PLAYER TIMER
+--═══════════════════════════════════════════════════════════════════════════
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local VIM = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
+
+local LP = Players.LocalPlayer
+local PG = LP:WaitForChild("PlayerGui")
+
+-- Cleanup (re-execute safe)
+pcall(function() local o = PG:FindFirstChild("SubhamUI"); if o then o:Destroy() end end)
+pcall(function() local o = game:GetService("CoreGui"):FindFirstChild("SubhamUI"); if o then o:Destroy() end end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- STATE
+--═══════════════════════════════════════════════════════════════════════════
+local clicking = false
+local cps = 10
+local clickToken = 0
+local synthetic = false
+local synToken = 0
+local clickTargetBox = nil
+local autoClickSource = nil
+local autoClickTarget = nil
+
+local playerMemory = {}
+local timerTargetSeconds = 60
+local timerRunning = false
+local timerLoopToken = 0
+local detectionRadius = 20
+
+--═══════════════════════════════════════════════════════════════════════════
+-- HELPERS
+--═══════════════════════════════════════════════════════════════════════════
+local function formatTime(secs)
+    secs = math.floor(secs)
+    local h = math.floor(secs / 3600)
+    local m = math.floor((secs % 3600) / 60)
+    local s = secs % 60
+    return string.format("%02d:%02d:%02d", h, m, s)
+end
+
+-- Forward declarations
+local toggle
+local startAutoClicking, stopAutoClicking, refreshACBtn
+local startTimerLoop, stopTimerLoop
+local rebuildPlayerList, updateLiveDisplay
+
+--═══════════════════════════════════════════════════════════════════════════
+-- SCREEN GUI (CoreGui with PlayerGui fallback)
+--═══════════════════════════════════════════════════════════════════════════
+local SG = Instance.new("ScreenGui")
+SG.Name = "SubhamUI"
+SG.ResetOnSpawn = false
+SG.IgnoreGuiInset = true
+SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local parentedToCore = false
+pcall(function()
+    SG.Parent = game:GetService("CoreGui")
+    parentedToCore = true
+end)
+if not parentedToCore then SG.Parent = PG end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- TOP BAR (animated equalizer)
+--═══════════════════════════════════════════════════════════════════════════
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(0, 200, 0, 30)
+TopBar.Position = UDim2.new(0.5, -100, 0, 12)
+TopBar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+TopBar.BackgroundTransparency = 0.05
+TopBar.BorderSizePixel = 0
+TopBar.Active = true
+TopBar.ZIndex = 5
+TopBar.Parent = SG
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(1, 0)
+
+local TBStroke = Instance.new("UIStroke", TopBar)
+TBStroke.Color = Color3.fromRGB(131, 56, 236)
+TBStroke.Thickness = 1
+TBStroke.Transparency = 0.6
+
+local BarsContainer = Instance.new("Frame")
+BarsContainer.Size = UDim2.new(1, -20, 1, -8)
+BarsContainer.Position = UDim2.new(0, 10, 0, 4)
+BarsContainer.BackgroundTransparency = 1
+BarsContainer.Parent = TopBar
+
+local BarsLayout = Instance.new("UIListLayout")
+BarsLayout.FillDirection = Enum.FillDirection.Horizontal
+BarsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+BarsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+BarsLayout.Padding = UDim.new(0, 1)
+BarsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+BarsLayout.Parent = BarsContainer
+
+local EquilizerBars = {}
+for i = 1, 30 do
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(0, 1.5, 0.3, 0)
+    bar.BackgroundColor3 = Color3.fromRGB(131, 56, 236)
+    bar.BorderSizePixel = 0
+    bar.LayoutOrder = i
+    bar.Parent = BarsContainer
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+    local bg = Instance.new("UIGradient")
+    bg.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(200, 120, 255)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(131, 56, 236)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 134, 255)),
+    })
+    bg.Rotation = 90
+    bg.Parent = bar
+    table.insert(EquilizerBars, bar)
+end
+
+task.spawn(function()
+    while TopBar.Parent do
+        for _, bar in pairs(EquilizerBars) do
+            if bar and bar.Parent then
+                local h = math.random(25, 100) / 100
+                TweenService:Create(bar, TweenInfo.new(0.3, Enum.EasingStyle.Quad), {
+                    Size = UDim2.new(0, 1.5, h, 0)
+                }):Play()
+            end
+        end
+        task.wait(0.35)
+    end
+end)
+
+-- Top bar drag + tap
+local tbDragging = false
+local tbDragStart, tbStartPos
+local tbPressTime = 0
+local tbWasDragged = false
+
+TopBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        tbDragging = true
+        tbDragStart = input.Position
+        tbStartPos = TopBar.Position
+        tbPressTime = tick()
+        tbWasDragged = false
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if tbDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - tbDragStart
+        if math.abs(delta.X) > 5 or math.abs(delta.Y) > 5 then
+            tbWasDragged = true
+            TopBar.Position = UDim2.new(
+                tbStartPos.X.Scale, tbStartPos.X.Offset + delta.X,
+                tbStartPos.Y.Scale, tbStartPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if tbDragging then
+            local holdTime = tick() - tbPressTime
+            if not tbWasDragged and holdTime < 0.5 then
+                if toggle then toggle() end
+            end
+            tbDragging = false
+            tbWasDragged = false
+        end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- MAIN PANEL
+--═══════════════════════════════════════════════════════════════════════════
+local screenH = workspace.CurrentCamera.ViewportSize.Y
+local panelHeight = math.clamp(screenH * 0.72, 350, 560)
+
+local MF = Instance.new("Frame")
+MF.Size = UDim2.new(0, 280, 0, 0)
+MF.Position = UDim2.new(0.5, -140, 0.5, -panelHeight / 2)
+MF.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
+MF.BorderSizePixel = 0
+MF.Visible = false
+MF.ClipsDescendants = true
+MF.ZIndex = 10
+MF.Parent = SG
+Instance.new("UICorner", MF).CornerRadius = UDim.new(0, 16)
+
+local mss = Instance.new("UIStroke", MF)
+mss.Color = Color3.fromRGB(131, 56, 236)
+mss.Thickness = 1.5
+mss.Transparency = 0.2
+
+local mgrad = Instance.new("UIGradient", MF)
+mgrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 22, 50)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 15, 30)),
+})
+mgrad.Rotation = 135
+
+-- Header
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 48)
+Header.BackgroundColor3 = Color3.fromRGB(30, 22, 52)
+Header.BackgroundTransparency = 0.1
+Header.BorderSizePixel = 0
+Header.ZIndex = 11
+Header.Parent = MF
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 16)
+
+local HeaderFix = Instance.new("Frame")
+HeaderFix.Size = UDim2.new(1, 0, 0, 20)
+HeaderFix.Position = UDim2.new(0, 0, 1, -20)
+HeaderFix.BackgroundColor3 = Color3.fromRGB(30, 22, 52)
+HeaderFix.BackgroundTransparency = 0.1
+HeaderFix.BorderSizePixel = 0
+HeaderFix.ZIndex = 11
+HeaderFix.Parent = Header
+
+local HeaderGrad = Instance.new("UIGradient")
+HeaderGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 35, 100)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(40, 28, 70)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(55, 30, 90)),
+})
+HeaderGrad.Rotation = 45
+HeaderGrad.Parent = Header
+
+local Crown = Instance.new("TextLabel")
+Crown.Size = UDim2.new(0, 30, 0, 30)
+Crown.Position = UDim2.new(0, 12, 0.5, -15)
+Crown.BackgroundTransparency = 1
+Crown.Text = "👑"
+Crown.TextSize = 22
+Crown.Font = Enum.Font.GothamBold
+Crown.ZIndex = 12
+Crown.Parent = Header
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -80, 0, 20)
+Title.Position = UDim2.new(0, 48, 0, 8)
+Title.BackgroundTransparency = 1
+Title.Text = "SUBHAM STUFF"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 15
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.ZIndex = 12
+Title.Parent = Header
+
+local TitleGrad = Instance.new("UIGradient")
+TitleGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 100, 150)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(180, 100, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 180, 255)),
+})
+TitleGrad.Parent = Title
+
+task.spawn(function()
+    while Title.Parent do
+        TweenService:Create(TitleGrad, TweenInfo.new(3, Enum.EasingStyle.Linear), {
+            Rotation = TitleGrad.Rotation + 360
+        }):Play()
+        task.wait(3)
+    end
+end)
+
+local Sub = Instance.new("TextLabel")
+Sub.Size = UDim2.new(1, -80, 0, 12)
+Sub.Position = UDim2.new(0, 48, 0, 28)
+Sub.BackgroundTransparency = 1
+Sub.Text = "v1.0 • CLEAN UI"
+Sub.TextColor3 = Color3.fromRGB(150, 150, 180)
+Sub.TextSize = 9
+Sub.Font = Enum.Font.GothamBold
+Sub.TextXAlignment = Enum.TextXAlignment.Left
+Sub.ZIndex = 12
+Sub.Parent = Header
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Position = UDim2.new(1, -36, 0, 11)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(255, 60, 80)
+CloseBtn.BackgroundTransparency = 0.5
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 13
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.BorderSizePixel = 0
+CloseBtn.ZIndex = 12
+CloseBtn.Parent = Header
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(1, 0)
+
+CloseBtn.MouseEnter:Connect(function()
+    TweenService:Create(CloseBtn, TweenInfo.new(0.15), { BackgroundTransparency = 0 }):Play()
+end)
+CloseBtn.MouseLeave:Connect(function()
+    TweenService:Create(CloseBtn, TweenInfo.new(0.15), { BackgroundTransparency = 0.5 }):Play()
+end)
+
+-- Scroll
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, -20, 1, -60)
+Scroll.Position = UDim2.new(0, 10, 0, 52)
+Scroll.BackgroundTransparency = 1
+Scroll.BorderSizePixel = 0
+Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarImageColor3 = Color3.fromRGB(131, 56, 236)
+Scroll.ScrollBarImageTransparency = 0.3
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Scroll.ZIndex = 12
+Scroll.Parent = MF
+
+local SLL = Instance.new("UIListLayout")
+SLL.Padding = UDim.new(0, 8)
+SLL.SortOrder = Enum.SortOrder.LayoutOrder
+SLL.Parent = Scroll
+
+local SPP = Instance.new("UIPadding")
+SPP.PaddingTop = UDim.new(0, 4)
+SPP.PaddingBottom = UDim.new(0, 10)
+SPP.PaddingLeft = UDim.new(0, 4)
+SPP.PaddingRight = UDim.new(0, 4)
+SPP.Parent = Scroll
+
+--═══════════════════════════════════════════════════════════════════════════
+-- UI BUILDERS
+--═══════════════════════════════════════════════════════════════════════════
+local orderCounter = 0
+
+local function makeSection(title)
+    orderCounter += 1
+    local sec = Instance.new("Frame")
+    sec.Name = title
+    sec.Size = UDim2.new(1, 0, 0, 0)
+    sec.AutomaticSize = Enum.AutomaticSize.Y
+    sec.BackgroundColor3 = Color3.fromRGB(25, 20, 40)
+    sec.BackgroundTransparency = 0.15
+    sec.BorderSizePixel = 0
+    sec.LayoutOrder = orderCounter
+    sec.ZIndex = 13
+    sec.Parent = Scroll
+    Instance.new("UICorner", sec).CornerRadius = UDim.new(0, 10)
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(100, 50, 160)
+    s.Thickness = 1
+    s.Transparency = 0.3
+    s.Parent = sec
+    local sl = Instance.new("UIListLayout")
+    sl.Padding = UDim.new(0, 5)
+    sl.SortOrder = Enum.SortOrder.LayoutOrder
+    sl.Parent = sec
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 8)
+    pad.PaddingBottom = UDim.new(0, 8)
+    pad.PaddingLeft = UDim.new(0, 8)
+    pad.PaddingRight = UDim.new(0, 8)
+    pad.Parent = sec
+    local hdr = Instance.new("TextLabel")
+    hdr.Size = UDim2.new(1, 0, 0, 18)
+    hdr.BackgroundTransparency = 1
+    hdr.Text = "── " .. title .. " ──"
+    hdr.TextColor3 = Color3.fromRGB(200, 150, 255)
+    hdr.Font = Enum.Font.GothamBold
+    hdr.TextSize = 11
+    hdr.TextXAlignment = Enum.TextXAlignment.Center
+    hdr.LayoutOrder = 0
+    hdr.ZIndex = 14
+    hdr.Parent = sec
+    return sec
+end
+
+local function makeBtn(parent, text, size, bg, layoutOrder)
+    local b = Instance.new("TextButton")
+    b.Size = size or UDim2.new(1, 0, 0, 28)
+    b.BackgroundColor3 = bg or Color3.fromRGB(80, 50, 160)
+    b.Text = text
+    b.TextColor3 = Color3.new(1,1,1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.LayoutOrder = layoutOrder or 1
+    b.ZIndex = 14
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.Parent = parent
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.15), { BackgroundTransparency = 0.2 }):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.15), { BackgroundTransparency = 0 }):Play()
+    end)
+    return b
+end
+
+local function makeBox(parent, text, size, layoutOrder)
+    local t = Instance.new("TextBox")
+    t.Size = size or UDim2.new(1, 0, 0, 26)
+    t.BackgroundColor3 = Color3.fromRGB(35, 25, 55)
+    t.Text = text or ""
+    t.TextColor3 = Color3.new(1,1,1)
+    t.Font = Enum.Font.Gotham
+    t.TextSize = 11
+    t.LayoutOrder = layoutOrder or 1
+    t.ZIndex = 14
+    t.BorderSizePixel = 0
+    t.ClearTextOnFocus = false
+    t.Parent = parent
+    Instance.new("UICorner", t).CornerRadius = UDim.new(0, 6)
+    local s = Instance.new("UIStroke")
+    s.Color = Color3.fromRGB(100, 50, 160)
+    s.Thickness = 1
+    s.Transparency = 0.5
+    s.Parent = t
+    return t
+end
+
+local function makeLbl(parent, text, size, color, layoutOrder, xAlign)
+    local l = Instance.new("TextLabel")
+    l.Size = size or UDim2.new(1, 0, 0, 16)
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = color or Color3.fromRGB(200, 200, 220)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 11
+    l.TextXAlignment = xAlign or Enum.TextXAlignment.Left
+    l.LayoutOrder = layoutOrder or 1
+    l.ZIndex = 14
+    l.Parent = parent
+    return l
+end
+
+local function makeRow(parent, height, layoutOrder)
+    local r = Instance.new("Frame")
+    r.Size = UDim2.new(1, 0, 0, height or 26)
+    r.BackgroundTransparency = 1
+    r.LayoutOrder = layoutOrder or 1
+    r.ZIndex = 14
+    r.Parent = parent
+    return r
+end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- SECTION: AUTO CLICKER
+--═══════════════════════════════════════════════════════════════════════════
+local acSec = makeSection("AUTO CLICKER")
+local acToggleBtn = makeBtn(acSec, "▶ START CLICKING", UDim2.new(1, 0, 0, 30), Color3.fromRGB(40, 150, 60), 1)
+local cpsRow = makeRow(acSec, 26, 2)
+local cpsLbl = makeLbl(cpsRow, "CPS (1-50):", UDim2.new(0, 80, 1, 0), nil, 1)
+cpsLbl.Position = UDim2.new(0, 0, 0, 0)
+local cpsBox = makeBox(cpsRow, tostring(cps), UDim2.new(0, 60, 1, 0), 1)
+cpsBox.Position = UDim2.new(0, 84, 0, 0)
+local cpsSetBtn = makeBtn(cpsRow, "Set", UDim2.new(0, 50, 1, 0), Color3.fromRGB(80, 50, 160), 2)
+cpsSetBtn.Position = UDim2.new(1, -50, 0, 0)
+local placeBtn = makeBtn(acSec, "📌 Place Click Box", UDim2.new(1, 0, 0, 28), Color3.fromRGB(60, 80, 180), 3)
+local removeBtn = makeBtn(acSec, "🗑 Remove Box", UDim2.new(1, 0, 0, 28), Color3.fromRGB(120, 40, 40), 4)
+
+cpsSetBtn.MouseButton1Click:Connect(function()
+    local n = tonumber(cpsBox.Text)
+    if n then
+        cps = math.clamp(math.floor(n), 1, 50)
+        cpsBox.Text = tostring(cps)
+    end
+end)
+
+acToggleBtn.MouseButton1Click:Connect(function()
+    if clicking then stopAutoClicking() else startAutoClicking("manual", nil) end
+    refreshACBtn()
+end)
+
+placeBtn.MouseButton1Click:Connect(function()
+    if clickTargetBox then clickTargetBox:Destroy() end
+    local box = Instance.new("Frame")
+    box.Name = "ClickTarget"
+    box.Size = UDim2.new(0, 60, 0, 60)
+    box.Position = UDim2.new(0.5, -30, 0.5, -30)
+    box.BackgroundColor3 = Color3.fromRGB(255, 100, 0)
+    box.BackgroundTransparency = 0.3
+    box.BorderSizePixel = 0
+    box.ZIndex = 60
+    box.Active = false
+    box.Parent = SG
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+    local bs = Instance.new("UIStroke")
+    bs.Color = Color3.fromRGB(255, 180, 0)
+    bs.Thickness = 2
+    bs.Parent = box
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1,0,1,0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = "CLICK"
+    lbl.TextColor3 = Color3.new(1,1,1)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11
+    lbl.ZIndex = 61
+    lbl.Parent = box
+    -- Drag
+    local dragging = false
+    local dragStart, startPos
+    box.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = box.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            box.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    clickTargetBox = box
+end)
+
+removeBtn.MouseButton1Click:Connect(function()
+    if clickTargetBox then
+        clickTargetBox:Destroy()
+        clickTargetBox = nil
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- SECTION: VELOCIDAD
+--═══════════════════════════════════════════════════════════════════════════
+local velSec = makeSection("VELOCIDAD")
+makeLbl(velSec, "Walk Speed:", UDim2.new(1, 0, 0, 16), nil, 1)
+local speedBox = makeBox(velSec, "16", UDim2.new(1, 0, 0, 26), 2)
+local speedBtn = makeBtn(velSec, "Set Speed", UDim2.new(1, 0, 0, 26), Color3.fromRGB(60, 100, 180), 3)
+
+speedBtn.MouseButton1Click:Connect(function()
+    local n = tonumber(speedBox.Text)
+    if n and LP.Character then
+        local hum = LP.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = math.clamp(n, 0, 500) end
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- SECTION: CALIBRACIÓN (now wired into VIM click)
+--═══════════════════════════════════════════════════════════════════════════
+local calSec = makeSection("CALIBRACIÓN")
+makeLbl(calSec, "Ajuste X / Y (offset px):", UDim2.new(1, 0, 0, 14), nil, 1)
+local calRow = makeRow(calSec, 26, 2)
+local xBox = makeBox(calRow, "0", UDim2.new(0.48, 0, 1, 0), 1)
+xBox.Position = UDim2.new(0, 0, 0, 0)
+local yBox = makeBox(calRow, "0", UDim2.new(0.48, 0, 1, 0), 2)
+yBox.Position = UDim2.new(0.52, 0, 0, 0)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- SECTION: PLAYER TIMER
+--═══════════════════════════════════════════════════════════════════════════
+local timerSec = makeSection("PLAYER TIMER (20 studs)")
+
+local targetDisplayLbl = makeLbl(timerSec, "Target: " .. formatTime(timerTargetSeconds), UDim2.new(1, 0, 0, 16), Color3.fromRGB(255, 215, 0), 1)
+targetDisplayLbl.Font = Enum.Font.GothamBold
+
+local timerInputRow = makeRow(timerSec, 26, 2)
+local timerNumBox = makeBox(timerInputRow, "1", UDim2.new(0, 55, 1, 0), 1)
+timerNumBox.Position = UDim2.new(0, 0, 0, 0)
+local hBtn = makeBtn(timerInputRow, "H", UDim2.new(0, 45, 1, 0), Color3.fromRGB(80, 30, 140), 2)
+hBtn.Position = UDim2.new(0, 60, 0, 0)
+local minBtn = makeBtn(timerInputRow, "MIN", UDim2.new(0, 55, 1, 0), Color3.fromRGB(100, 50, 160), 3)
+minBtn.Position = UDim2.new(0, 110, 0, 0)
+
+local function applyTimerInput(isHours)
+    local n = tonumber(timerNumBox.Text)
+    if not n or n <= 0 then return end
+    n = math.floor(n)
+    timerTargetSeconds = isHours and (n * 3600) or (n * 60)
+    targetDisplayLbl.Text = "Target: " .. formatTime(timerTargetSeconds)
+end
+hBtn.MouseButton1Click:Connect(function() applyTimerInput(true) end)
+minBtn.MouseButton1Click:Connect(function() applyTimerInput(false) end)
+
+local liveBox = Instance.new("Frame")
+liveBox.Size = UDim2.new(1, 0, 0, 40)
+liveBox.BackgroundColor3 = Color3.fromRGB(20, 10, 38)
+liveBox.BackgroundTransparency = 0.2
+liveBox.BorderSizePixel = 0
+liveBox.LayoutOrder = 3
+liveBox.ZIndex = 14
+liveBox.Parent = timerSec
+Instance.new("UICorner", liveBox).CornerRadius = UDim.new(0, 8)
+
+local liveLbl = makeLbl(liveBox, "🔍 Koi player 20 studs me nahi", UDim2.new(1, -10, 1, 0), Color3.fromRGB(180, 180, 200), 1)
+liveLbl.Position = UDim2.new(0, 5, 0, 0)
+liveLbl.TextSize = 10
+liveLbl.TextWrapped = true
+
+local timerToggleBtn = makeBtn(timerSec, "▶ START TIMER", UDim2.new(1, 0, 0, 28), Color3.fromRGB(40, 140, 80), 4)
+timerToggleBtn.MouseButton1Click:Connect(function()
+    if timerRunning then stopTimerLoop() else startTimerLoop() end
+end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- SECTION: PLAYER LIST
+--═══════════════════════════════════════════════════════════════════════════
+local listSec = makeSection("PLAYER LIST")
+
+local listScroll = Instance.new("ScrollingFrame")
+listScroll.Size = UDim2.new(1, 0, 0, 180)
+listScroll.BackgroundColor3 = Color3.fromRGB(14, 7, 26)
+listScroll.BackgroundTransparency = 0.3
+listScroll.BorderSizePixel = 0
+listScroll.ScrollBarThickness = 2
+listScroll.ScrollBarImageColor3 = Color3.fromRGB(120, 60, 200)
+listScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+listScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+listScroll.LayoutOrder = 1
+listScroll.ZIndex = 15
+listScroll.Parent = listSec
+Instance.new("UICorner", listScroll).CornerRadius = UDim.new(0, 6)
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 2)
+listLayout.Parent = listScroll
+
+local emptyListLbl = makeLbl(listScroll, "Koi player detect nahi hua abhi", UDim2.new(1, 0, 0, 40), Color3.fromRGB(140, 120, 170), 0, Enum.TextXAlignment.Center)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- TOGGLE FUNCTION
+--═══════════════════════════════════════════════════════════════════════════
+local open = false
+local animating = false
+
+toggle = function()
+    if animating then return end
+    animating = true
+    open = not open
+    if open then
+        MF.Visible = true
+        MF.Size = UDim2.new(0, 280, 0, 0)
+        TweenService:Create(MF, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.new(0, 280, 0, panelHeight)
+        }):Play()
+        TweenService:Create(TBStroke, TweenInfo.new(0.3), {
+            Color = Color3.fromRGB(255, 215, 0), Transparency = 0
+        }):Play()
+        task.wait(0.4)
+    else
+        TweenService:Create(MF, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.new(0, 280, 0, 0)
+        }):Play()
+        TweenService:Create(TBStroke, TweenInfo.new(0.3), {
+            Color = Color3.fromRGB(131, 56, 236), Transparency = 0.6
+        }):Play()
+        task.wait(0.3)
+        MF.Visible = false
+    end
+    animating = false
+end
+
+CloseBtn.MouseButton1Click:Connect(function()
+    if open then toggle() end
+end)
+
+-- Header drag
+local menuDrag = false
+local menuStart, menuStartPos
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        menuDrag = true
+        menuStart = input.Position
+        menuStartPos = MF.Position
+    end
+end)
+UIS.InputChanged:Connect(function(input)
+    if menuDrag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - menuStart
+        MF.Position = UDim2.new(
+            menuStartPos.X.Scale, menuStartPos.X.Offset + delta.X,
+            menuStartPos.Y.Scale, menuStartPos.Y.Offset + delta.Y
+        )
+    end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        menuDrag = false
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- BACKEND: VIM CLICK (with calibration offset)
+--═══════════════════════════════════════════════════════════════════════════
+local function doVIMClick(frame)
+    if not frame or not frame.Parent then return end
+    local xOff = tonumber(xBox.Text) or 0
+    local yOff = tonumber(yBox.Text) or 0
+    local pos = frame.AbsolutePosition
+    local size = frame.AbsoluteSize
+    local x = pos.X + size.X / 2 + xOff
+    local y = pos.Y + size.Y / 2 + yOff
+    synToken += 1
+    local t = synToken
+    synthetic = true
+    VIM:SendMouseButtonEvent(x, y, 0, true, game, 1)
+    task.wait(0)
+    VIM:SendMouseButtonEvent(x, y, 0, false, game, 1)
+    task.delay(0.06, function()
+        if synToken == t then synthetic = false end
+    end)
+end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- BACKEND: AUTO CLICKER (bug-fixed)
+--═══════════════════════════════════════════════════════════════════════════
+refreshACBtn = function()
+    if clicking then
+        acToggleBtn.Text = "⏹ STOP CLICKING"
+        acToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    else
+        acToggleBtn.Text = "▶ START CLICKING"
+        acToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 150, 60)
+    end
+end
+
+startAutoClicking = function(source, targetName)
+    if clicking then return end
+    if not clickTargetBox or not clickTargetBox.Parent then return end -- FIX #1
+    clicking = true
+    clickToken += 1
+    local myToken = clickToken
+    autoClickSource = source or "manual"
+    autoClickTarget = targetName
+    task.spawn(function()
+        while clicking and myToken == clickToken do
+            if not clickTargetBox or not clickTargetBox.Parent then -- FIX #1
+                clicking = false; refreshACBtn(); break
+            end
+            if autoClickSource == "timer" and autoClickTarget then -- FIX #2
+                local shouldStop = false
+                local targetP = Players:FindFirstChild(autoClickTarget)
+                if not targetP then
+                    shouldStop = true
+                else
+                    local tChar = targetP.Character
+                    local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+                    local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+                    if not tHum or tHum.Health <= 0 or not tRoot then
+                        shouldStop = true
+                    else
+                        local myChar = LP.Character
+                        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                        if not myRoot then
+                            shouldStop = true
+                        elseif (tRoot.Position - myRoot.Position).Magnitude > detectionRadius then
+                            shouldStop = true
+                        end
+                    end
+                end
+                if shouldStop then
+                    clicking = false; refreshACBtn(); break
+                end
+            end
+            local ok, err = pcall(doVIMClick, clickTargetBox)
+            if not ok then
+                warn("[AutoClicker] " .. tostring(err))
+                clicking = false; refreshACBtn(); break
+            end
+            task.wait(math.clamp(1 / cps, 0.02, 1))
+        end
+    end)
+end
+
+stopAutoClicking = function()
+    clicking = false
+    clickToken += 1
+    autoClickSource = nil
+    autoClickTarget = nil
+end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- BACKEND: NEAREST PLAYER (health-checked)
+--═══════════════════════════════════════════════════════════════════════════
+local function getNearestPlayer()
+    local myChar = LP.Character
+    if not myChar then return nil, nil end
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil, nil end
+    local nearest = nil
+    local nearestDist = math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            local char = p.Character
+            if char then
+                local root = char:FindFirstChild("HumanoidRootPart")
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if root and hum and hum.Health > 0 then -- FIX #6
+                    local dist = (root.Position - myRoot.Position).Magnitude
+                    if dist <= detectionRadius and dist < nearestDist then
+                        nearestDist = dist
+                        nearest = p
+                    end
+                end
+            end
+        end
+    end
+    return nearest, nearestDist
+end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- BACKEND: LIVE DISPLAY
+--═══════════════════════════════════════════════════════════════════════════
+updateLiveDisplay = function()
+    local myChar = LP.Character
+    if not myChar then
+        liveLbl.Text = "⏸️ Character load nahi hua"
+        liveLbl.TextColor3 = Color3.fromRGB(180, 160, 100)
+        return
+    end
+    local nearest, dist = getNearestPlayer()
+    if not nearest then
+        liveLbl.Text = "🔍 Koi player 20 studs me nahi"
+        liveLbl.TextColor3 = Color3.fromRGB(180, 180, 200)
+        return
+    end
+    local name = nearest.Name
+    local mem = playerMemory[name]
+    if not mem then
+        liveLbl.Text = "🔍 Koi player 20 studs me nahi"
+        liveLbl.TextColor3 = Color3.fromRGB(180, 180, 200)
+        return
+    end
+    if mem.done then
+        liveLbl.Text = "✅ " .. name .. " — COMPLETE"
+        liveLbl.TextColor3 = Color3.fromRGB(80, 255, 100)
+    else
+        local distStr = string.format("%.0f", dist)
+        liveLbl.Text = "🎯 " .. name .. " — " .. formatTime(mem.time)
+            .. " / " .. formatTime(timerTargetSeconds)
+            .. " (" .. distStr .. " studs)"
+        liveLbl.TextColor3 = Color3.fromRGB(220, 220, 255)
+    end
+end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- BACKEND: TIMER LOOP
+--═══════════════════════════════════════════════════════════════════════════
+startTimerLoop = function()
+    if timerRunning then return end
+    timerRunning = true
+    timerLoopToken += 1
+    local myToken = timerLoopToken
+    timerToggleBtn.Text = "⏹ STOP TIMER"
+    timerToggleBtn.BackgroundColor3 = Color3.fromRGB(160, 40, 40)
+    task.spawn(function()
+        while timerRunning and myToken == timerLoopToken do
+            local nearest = getNearestPlayer()
+            if nearest then
+                local name = nearest.Name
+                if not playerMemory[name] then
+                    playerMemory[name] = { time = 0, done = false }
+                end
+                local mem = playerMemory[name]
+                if not mem.done then
+                    mem.time += 0.5
+                    if mem.time >= timerTargetSeconds then
+                        mem.time = timerTargetSeconds
+                        mem.done = true
+                        task.spawn(function()
+                            startAutoClicking("timer", name)
+                            refreshACBtn()
+                        end)
+                    end
+                end
+            end
+            for name2, mem2 in pairs(playerMemory) do
+                if not mem2.done then
+                    local isNear = (nearest and nearest.Name == name2)
+                    if not isNear then
+                        local p2 = Players:FindFirstChild(name2)
+                        local myChar2 = LP.Character
+                        if p2 and myChar2 then
+                            local char2 = p2.Character
+                            local hum2 = char2 and char2:FindFirstChildOfClass("Humanoid")
+                            local r2 = char2 and char2:FindFirstChild("HumanoidRootPart")
+                            local rm = myChar2:FindFirstChild("HumanoidRootPart")
+                            if r2 and rm then
+                                local d2 = (r2.Position - rm.Position).Magnitude
+                                if d2 > detectionRadius or not hum2 or hum2.Health <= 0 then
+                                    mem2.time = 0
+                                end
+                            else
+                                mem2.time = 0
+                            end
+                        else
+                            mem2.time = 0
+                        end
+                    end
+                end
+            end
+            updateLiveDisplay()
+            task.wait(0.5)
+        end
+    end)
+end
+
+stopTimerLoop = function()
+    timerRunning = false
+    timerLoopToken += 1
+    timerToggleBtn.Text = "▶ START TIMER"
+    timerToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 140, 80)
+    liveLbl.Text = "🔍 Koi player 20 studs me nahi"
+    liveLbl.TextColor3 = Color3.fromRGB(180, 180, 200)
+end
+
+--═══════════════════════════════════════════════════════════════════════════
+-- BACKEND: PLAYER LIST (in-place update — FIX #5)
+--═══════════════════════════════════════════════════════════════════════════
+local rowCache = {}
+local lastSetSig = ""
+local lastDoneSig = ""
+
+local function getSetSig()
+    local names = {}
+    for name in pairs(playerMemory) do names[#names+1] = name end
+    table.sort(names)
+    return table.concat(names, ",")
+end
+
+local function getDoneSig()
+    local parts = {}
+    for name, mem in pairs(playerMemory) do
+        parts[#parts+1] = name .. ":" .. tostring(mem.done)
+    end
+    table.sort(parts)
+    return table.concat(parts, "|")
+end
+
+rebuildPlayerList = function()
+    local setSig = getSetSig()
+    local doneSig = getDoneSig()
+    if setSig ~= lastSetSig or doneSig ~= lastDoneSig then
+        for _, child in ipairs(listScroll:GetChildren()) do
+            if child:IsA("Frame") or child:IsA("TextButton") then child:Destroy() end
+        end
+        rowCache = {}
+        local activeList, completeList = {}, {}
+        for name, mem in pairs(playerMemory) do
+            if mem.done then completeList[#completeList+1] = { name = name, mem = mem }
+            else activeList[#activeList+1] = { name = name, mem = mem } end
+        end
+        table.sort(activeList, function(a,b) return a.mem.time > b.mem.time end)
+        table.sort(completeList, function(a,b) return a.mem.time > b.mem.time end)
+        emptyListLbl.Visible = (#activeList + #completeList) == 0
+        local order = 1
+        local function addEntry(name, mem)
+            local row = Instance.new("Frame")
+            row.Size = UDim2.new(1, 0, 0, 30)
+            row.BackgroundColor3 = mem.done and Color3.fromRGB(20, 40, 20) or Color3.fromRGB(28, 14, 48)
+            row.BackgroundTransparency = 0.3
+            row.BorderSizePixel = 0
+            row.LayoutOrder = order
+            row.ZIndex = 16
+            row.Parent = listScroll
+            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+            local statusLbl = Instance.new("TextLabel")
+            statusLbl.Size = UDim2.new(0, 20, 1, 0)
+            statusLbl.Position = UDim2.new(0, 4, 0, 0)
+            statusLbl.BackgroundTransparency = 1
+            statusLbl.Text = mem.done and "✓" or "•"
+            statusLbl.TextColor3 = mem.done and Color3.fromRGB(80, 255, 100) or Color3.fromRGB(180, 80, 255)
+            statusLbl.Font = Enum.Font.GothamBold
+            statusLbl.TextSize = 14
+            statusLbl.ZIndex = 17
+            statusLbl.Parent = row
+            local nameLbl = Instance.new("TextLabel")
+            nameLbl.Size = UDim2.new(0, 110, 1, 0)
+            nameLbl.Position = UDim2.new(0, 24, 0, 0)
+            nameLbl.BackgroundTransparency = 1
+            nameLbl.Text = name
+            nameLbl.TextColor3 = Color3.new(1, 1, 1)
+            nameLbl.Font = Enum.Font.Gotham
+            nameLbl.TextSize = 10
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+            nameLbl.ZIndex = 17
+            nameLbl.Parent = row
+            local timeLbl = Instance.new("TextLabel")
+            timeLbl.Size = UDim2.new(0, 80, 1, 0)
+            timeLbl.Position = UDim2.new(1, -82, 0, 0)
+            timeLbl.BackgroundTransparency = 1
+            timeLbl.Text = formatTime(mem.time)
+            timeLbl.TextColor3 = mem.done and Color3.fromRGB(80, 255, 100) or Color3.fromRGB(220, 220, 240)
+            timeLbl.Font = Enum.Font.Gotham
+            timeLbl.TextSize = 10
+            timeLbl.TextXAlignment = Enum.TextXAlignment.Right
+            timeLbl.ZIndex = 17
+            timeLbl.Parent = row
+            rowCache[name] = { row = row, timeLbl = timeLbl, statusLbl = statusLbl }
+            order += 1
+        end
+        for _, e in ipairs(activeList) do addEntry(e.name, e.mem) end
+        for _, e in ipairs(completeList) do addEntry(e.name, e.mem) end
+        lastSetSig = setSig
+        lastDoneSig = doneSig
+    else
+        for name, mem in pairs(playerMemory) do
+            local r = rowCache[name]
+            if r and r.timeLbl then r.timeLbl.Text = formatTime(mem.time) end
+        end
+    end
+end
+
+task.spawn(function()
+    while SG.Parent do
+        pcall(rebuildPlayerList)
+        task.wait(1)
+    end
+end)
+
+--═══════════════════════════════════════════════════════════════════════════
+-- LOAD NOTIFICATION
+--═══════════════════════════════════════════════════════════════════════════
+task.spawn(function()
+    task.wait(1)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Subham Stuff",
+            Text = "Script loaded! ⚡ All features ready.",
+            Duration = 4,
+        })
+    end)
+end)
